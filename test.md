@@ -1,252 +1,199 @@
-# 前言
+# 项目构建日志：电影院售票系统开发之旅
 
-现在是早上8:40，没课就是好啊。今天要把登录验证弄完，然后稍微复习一下，明天就要开始自己构建项目了。
+## 前言
+----------------------------------------
+现在是早上九点30分，从今天开始就要构建自己的项目了。今天主要是来需求分析，绘制表结构，对项目的流程进行一个整体的安排，完成工具类的构建和测试。
 
----
+## 日程
+----------------------------------------
+- **12点左右**：完成了整体的时间安排。
+- **14:23**：开始构建项目。
+- **18:00**：基本的工具类搞定了，准备尝试配置服务器。
+- **19:00**：被Tomcat的路径折磨了一个小时，终于是扫描到了。
+- **23:00**：今天的主要目标大部分都达成了，最后试着写了写接口文档。
 
-# 日程
+## 学习内容
+----------------------------------------
+### 1. 需求分析
+这是一个电影院售票系统，要将用户分为普通用户和管理员。
 
-- 11:50 把实战部分写完了（有点肝痛了，什么赛博搬砖）。
-- 休息到下午。
-- 床单杀人类的可能性很小，但不是没有。本来3:30的闹钟，现在4:30了，脑袋还晕晕乎乎的。
-- 7:46了，byd午觉的后劲还没有消退，先洗个澡，以后午觉一定不能睡太久。
-- 21:30 搞定了，到后面感觉自己有点敷衍了。百里路，九十行半里啊。
+#### 普通用户功能
+- 完成注册、登录、提交修改个人信息。
+- 查看电影信息，查看订单历史，购买电影票。
+- （提高功能）模拟支付、观影提醒、高并发处理、密码加密、可视化选座、申请退票、评论区。
 
----
+#### 管理员功能
+- 编辑电影信息，查看订票信息。
+- （提高功能）处理退票申请、拉黑用户、关停/启用某个放映厅、数据分析看板、管理评论区。
 
-# 学习内容
+### 2. 建表
+经过和鲸鱼朋友的激烈讨论（大嘘），目前的表结构如下：
 
-## 省流：1.登录验证
+#### 用户相关
+- **用户基础信息表 `users`**
+  - 在用户注册时添加。
+  - 在用户登录时对信息进行校验。
+  - 管理员可以ban掉普通用户。
+- **用户额外信息表 `user_profiles`**
+  - 由普通用户增加、修改、删除相关信息。
 
-## 小知识：
+#### 电影相关
+- **电影基础信息表 `movies`**
+  - 由管理员增加、修改、删除相关信息。
+  - 被所有用户查询。
+- **电影详细信息表 `movies_detail`**
+  - 由管理员增加、修改、删除相关信息。
+  - 被所有用户查询。
+- **放映厅表 `halls`**
+  - 由管理员增加、修改、删除相关信息。
+  - 被所有用户查询。
+- **场次表 `screenings`**
+  - 由管理员增加、修改、删除相关信息。
+  - 被所有用户查询。
+- **电影评论表（待用）`comments`**
+  - 因为对整体功能的影响不大，所以来不及就不做了。
+  - 由普通用户增加、修改、删除自己的评论。
+  - 管理员可以对评论进行封禁、删除。
+  - 所有人能看见当前电影的评论。
 
-在 SQL 查询中，如果某些字段可能为 NULL，你可以使用 COALESCE 函数来将 NULL 值替换为其他值。COALESCE 函数会返回其参数列表中的第一个非 NULL 值。
+#### 订单相关
+- **订单信息表 `orders`**
+  - 在普通用户进行购票后添加。
+  - 考虑自动清除过期的信息。
+  - 管理员可以查询。
+- **订单座位表 `order_seats`**
+  - 在普通用户进行购票后添加。
+  - 普通用户可以查询自己的。
+  - 管理员可以查询所有普通用户的。
+  - 考虑自动删除过期的。
+- **支付记录表 `payments`**
+  - 考虑自动删除过期的（正常来说是应该留个记录的吧）。
+  - 普通用户提交要求，由服务器进行增删改。
+- **退票申请表 `refunds`**
+  - 普通用户提交要求，管理员可以查询和处理。
+  - 普通用户能看到自己的申请状态。
+- **观影提示表 `reminders`**
+  - 由系统进行增删改。
+  - 普通用户在登录时进行时间检测。
 
-## 登录验证
+#### 系统相关
+- **系统日志表 `logs`**
+  - 对每次操作进行记录。
+  - 管理员可以查询和删除记录。
 
-### 会话：用户与服务器资源进行连接的过程。
+考虑再增加：信息统计相关表。
 
-| 技术方案 | 优点 | 缺点 |
-| --- | --- | --- |
-| 方案一（Cookie） | - HTTP协议中支持的技术 | - 移动端APP无法使用Cookie<br>- 不安全，用户可以自己禁用Cookie<br>- Cookie不能跨域 |
-| 方案二（Session） | - 存储在服务端，安全 | - 服务器集群环境下无法直接使用Session<br>- Cookie的缺点 |
-| 方案三（令牌） | - 支持PC端、移动端<br>- 解决集群环境下的认证问题<br>- 减轻服务器端存储压力 | - 需要自己实现 |
+**13张表，怎么想都做不完罢 😨**
 
-> 目前主流的方案是令牌
+### 3. 安排项目流程
+我将项目分为了几个大版本：
 
-## JWT令牌：
+#### Beta-0.x
+- 完成基础的工具类的搭建，如动态SQL语句的构建，数据库的连接，日志管理，JSON解析等。
+- 项目的大致骨架，导入实体类。
 
-定义了一种简洁的、自包含的格式，用于在通信双方以json数据格式安全的传输信息。以Base64作为编码格式。
+#### Beta-1.x
+- 在完成对应的功能前，先写好对应的接口文档。
+- 系统日志表。
+- 电影基础信息表（管理员部分）。
+- 放映厅表（管理员部分）。
+- 场次表（管理员部分）。
+- 用户基础信息表。
+- 登录信息校验。
+- 电影基础信息表、放映厅表、场次表（普通用户部分）。
 
-### 组成：
+#### Beta-2.x
+- 实现前端的大致框架。
+- 依次完成连接上述功能的前端界面。
+- 部署前端，进行联调测试。
+- 发布能通过网页进行操作的Release-2.0版本。
 
-1. **第一部分**：Header（头），记录令牌类型、签名算法等。例如：
-   ```json
-   {"alg": "HS256", "type": "JWT"}
-   ```
+#### Beta-3.x
+- 用户额外信息表。
+- 订单信息表。
+- 订单座位表。
+- 支付记录表。
+- 发布能进行购票操作的Release-3.0版本。
 
-2. **第二部分**：Payload（有效载荷），携带一些自定义信息、默认信息等。例如：
-   ```json
-   {"id": "1", "username": "Tom"}
-   ```
+#### Beta-4.x
+- 观影提示表。
+- 电影详细信息表。
+- 电影评论表。
+- 解决高并发问题。
 
-3. **第三部分**：Signature（签名），防止Token被篡改、确保安全性。将header、payload融入，并加入指定秘钥，通过指定签名算法计算而来。
+#### Beta-5.x
+- 考虑实现一些额外的功能。
 
-## 入门程序：
+**感觉时间非常紧张，还有13天，每个大版本的时间要控制在4天内，要加油啊 🔥😡🫵**
 
-### 引入依赖
+### 4. 部署Tomcat
+因为弄了很久，来稍微写写记一下。
 
-**JWT**
-
+#### 引入依赖
 ```xml
+<!-- 嵌入式Tomcat核心 -->
 <dependency>
-    <groupId>io.jsonwebtoken</groupId>
-    <artifactId>jjwt</artifactId>
-    <version>0.9.1</version>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-core</artifactId>
+    <version>9.0.65</version>
+</dependency>
+<!-- 必须添加的JSP支持 -->
+<dependency>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-jasper</artifactId>
+    <version>9.0.65</version>
+</dependency>
+<!-- JSP API -->
+<dependency>
+    <groupId>javax.servlet</groupId>
+    <artifactId>javax.servlet-api</artifactId>
+    <version>4.0.1</version>
+    <scope>provided</scope>
 </dependency>
 ```
+我这里用了9.0版本的Tomcat，因为这个支持对@WebServlet("")注解进行自动扫描。
 
-### 定义生成和解析令牌的工具类
-
-```java
-public class JwtUtils {
-    private static final String SECRET_KEY = "aXRoZWltYQ=="; // 秘钥 把字符串转成base64格式
-    private static final long EXPIRATION_TIME = 12 * 60 * 60 * 1000; // 12小时
-
-    /**
-     * 生成JWT令牌
-     * @param claims 令牌中包含的信息
-     * @return 生成的JWT令牌字符串
-     */
-    public static String generateToken(Map<String, Object> claims) {
-        return Jwts.builder()
-                .signWith(SignatureAlgorithm.HS256, SECRET_KEY)
-                .addClaims(claims)
-                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION_TIME))
-                .compact();
-    }
-
-    /**
-     * 解析JWT令牌
-     * @param token 要解析的JWT令牌字符串
-     * @return 包含令牌信息的Claims对象
-     * @throws Exception 如果令牌无效或已过期，则抛出异常
-     */
-    public static Claims parseToken(String token) throws Exception {
-        return Jwts.parser()
-                .setSigningKey(SECRET_KEY)
-                .parseClaimsJws(token)
-                .getBody();
-    }
-}
-```
-
-## 过滤器Filter：
-
-```mermaid
-graph LR
-    A[浏览器] -->|请求| B[Filter]
-    B -->|拦截请求| C[Login]
-    B -->|拦截请求| D[Emp]
-    B -->|拦截请求| E[Dept]
-    B -->|拦截请求| F[Report]
-    C -->|响应| A
-    D -->|响应| A
-    E -->|响应| A
-    F -->|响应| A
-```
-
-### 拦截路径：
-
-```java
-@WebFilter(urlPatterns = "/*")
-```
-
-| 拦截路径   | urlPatterns值  | 含义                                       |
-|------------|----------------|--------------------------------------------|
-| 拦截具体路径 | /login         | 只有访问 /login 路径时，才会被拦截         |
-| 目录拦截   | /emps/*        | 访问/emps下的所有资源，都会被拦截           |
-| 拦截所有   | /*             | 访问所有资源，都会被拦截                    |
-
-### 入门程序：
-
-1. 定义filter类实现Filter的接口
-
-```java
-@WebFilter(urlPatterns = "/*")
-public class DemoFilter implements Filter {
-    @Override
-    public void init(FilterConfig filterConfig) throws ServletException {
-    }
-
-    @Override
-    public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
-        log.info("拦截请求");
-        //放行 -- 注意一定要手动放行，不然请求是过不去的
-        filterChain.doFilter(servletRequest, servletResponse);
-    }
-
-    @Override
-    public void destroy() {
-    }
-}
-```
-
-2. 在启动类中添加@ServletComponentScan注解
-
-Filter接口定义了三个方法：
-- 初始化，web服务器启动时调用
-- 拦截到请求后调用
-- 销毁，web服务器关闭后调用
-
-## 过滤器链：
-
-```mermaid
-graph LR
-    A[浏览器] -->|请求| B[Filter a]
-    B -->|放行前逻辑| C[Filter b]
-    C -->|放行前逻辑| D[Filter c]
-    D -->|放行前逻辑| E[资源]
-    E -->|响应| I[浏览器]
-```
-
-> 注解配置的过滤器，执行顺序按的类名的字典序从小到大
-
-## 拦截器Interceptor
-
-与Filter的功能层次相同，是Spring提供的技术方案
-
-### 入门程序：
-
-1. 定义拦截器，实现HandlerInterceptor接口
-
+#### 示例程序
 ```java
 @Slf4j
-@Component
-public class DemoInterceptor implements HandlerInterceptor {
-    //在目标资源方法运行之前运行 - 返回值: true 放行, false 不放行
-    @Override
-    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        log.info("preHandle ....");
-        return true;
-    }
+public class TomcatApplication {
+    public static void main(String[] args) throws Exception {
+        // 1. 创建Tomcat实例
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(8080);
 
-    //在目标资源方法运行之后运行
-    @Override
-    public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler, ModelAndView modelAndView) throws Exception {
-        log.info("postHandle ....");
-    }
+        // 2. 配置webapp目录并获取Context
+        String webappDir = new File("src/main/webapp").getAbsolutePath();
+        Context ctx = tomcat.addWebapp("", webappDir);
 
-    //视图渲染完毕后运行
-    @Override
-    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
-        log.info("afterCompletion ....");
+        // 确保 target/classes 目录被添加到类加载路径中
+        File classesDir = new File("target/classes");
+        ctx.setReloadable(true); // 允许热加载
+        ctx.setResources(new StandardRoot(ctx) {{
+            addPreResources(new DirResourceSet(this,
+                    "/WEB-INF/classes", classesDir.getAbsolutePath(), "/"));
+        }});
+
+        // 3. 启动服务器
+        tomcat.start();
+        log.info("Server running at http://localhost:{}", tomcat.getConnector().getPort());
+        tomcat.getServer().await();
     }
 }
 ```
+这里一定要对类加载路径进行重定向，因为Tomcat默认会扫描`src/main/webapp/WEB-INF`下的字节码文件，但是我的字节码文件是放在`target/classes`目录下的。
 
-2. 定义配置类，对拦截的请求路径进行配置
-
+#### 测试程序
 ```java
-@Configuration
-public class WebConfig implements WebMvcConfigurer {
-    @Autowired
-    private DemoInterceptor demoInterceptor;
-    @Autowired
-    private TokenInterceptor tokenInterceptor;
-
-    @Override
-    public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(tokenInterceptor)
-                .addPathPatterns("/**") // 拦截所有请求
-                .excludePathPatterns("/login"); // 不拦截哪些请求
+// 通过注解注册
+@WebServlet("/auto")
+public class AutoRegisteredServlet extends HttpServlet {
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        resp.getWriter().println("Auto-registered by annotation");
     }
 }
 ```
 
-### 拦截器的路径设置与过滤器有所区别
-
-| 拦截路径     | 含义                   | 举例                                      |
-|--------------|------------------------|-------------------------------------------|
-| /*           | 一级路径               | 能匹配/depts, /emps, /login, **不能匹配** /depts/1 |
-| /**          | 任意级路径             | 能匹配/depts, /depts/1, /depts/1/2         |
-| /depts/*     | /depts下的一级路径     | 能匹配/depts/1, **不能匹配** /depts/1/2, /depts |
-| /depts/**    | /depts下的任意级路径   | 能匹配/depts, /depts/1, /depts/1/2, **不能匹配** /emps/1 |
-
-## 拦截器与过滤器的区别：
-
-### Filter 与 Interceptor 区别：
-
-1. **接口规范不同**：
-   - 过滤器需要实现 `Filter` 接口，而拦截器需要实现 `HandlerInterceptor` 接口。
-
-2. **拦截范围不同**：
-   - 过滤器 `Filter` 会拦截所有的资源，而 `Interceptor` 只会拦截 Spring 环境中的资源。
-
-> 在执行时先执行过滤器，然后是拦截器
-
----
-
-# 结语
-
-🔥😡🫵
+## 结语
+----------------------------------------
+当我自己想构建项目又忘掉一些东西的时候，才发现以前写的blog在细节上有不少遗漏，以后还是应该注意一下。

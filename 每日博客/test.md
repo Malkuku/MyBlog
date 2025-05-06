@@ -1,282 +1,343 @@
-# 假日尾声：技术进阶与自我反思
+# 我的开发日志：类路径扫描、DI 容器与动态代理
 
 ## 前言
 ----------------------------------------
-于是，假日迎来了它的尾声，把快乐和焦躁都留存在昨天。  
-我只觉情感的自相矛盾在加重，学习让我焦躁，纵欲无法填补空虚，于是我的心被拖入了无止尽的拉扯中。  
-我还没有找到必须留存的理由，但反之而言，我也远没有到可以决定自己生命自由的时刻。  
-还是闭上双眼，向前走吧，明日难测，却因昨日懊悔。  
-今天来统计一下剩余的进阶要求和已经完成的进阶要求，再针对性地完成。
+我失忆了，完全不记得自己早上干了什么。
 
 ----------------------------------------
 
 ## 日程
 ----------------------------------------
-9点半，开始学习吧。  
-- 上午：连接池动态扩缩容问题弄了一早上  
-- 下午：完成了简单结果集映射  
-- 晚上8点：做完结果集相关的blog  
-- 嘻嘻，五一的学科作业还没写，我完蛋了。
+早上 10 点左右开始，学了一早上，主要是类路径扫描相关的调试。  
+晚上 8 点了，真不能再摸🐟了。
+
+----------------------------------------
+
+## 学习记录
+----------------------------------------
+计算机网络：
+    1. 子网划分与子网掩码
 
 ----------------------------------------
 
 ## 学习内容
 ----------------------------------------
-
 ### 省流
-1. 连接池动态扩缩容
-2. 项目阶段性进度检查
-3. 简单结果集映射
+1. 手搓类路径扫描器
+2. 手搓基础 DI 容器
+3. 动态代理
 
-### 1. 连接池动态扩缩容
-#### 1）动态扩容
-在等待线程大于最大等待线程值时，临时将线程池的大小扩大1.5倍。
+### 1. 手搓类路径扫描器
+1）首先要确定需要扫描的包  
 ```java
-if (rawConn == null && waitCount.get() > hakimiConfig.getMaxWaitThreads()) {
-    int temporaryMax = (int) (hakimiConfig.getMaxSize() * 1.5); // 扩容上限：maxSize 的 1.5 倍
-    int current;
-    do {
-        current = createdCount.get();
-        if (current >= temporaryMax) {
-            break; // 已达到扩容上限
+String path = packageName.replace('.', '/');
+```
+
+2）然后获取系统类加载器获取路径，并获取该路径下的所有资源  
+```java
+ClassLoader classLoader = ClassLoader.getSystemClassLoader();
+Enumeration<URL> resources = classLoader.getResources(path);
+```
+**注意**：系统类加载器 (`ClassLoader.getSystemClassLoader()`) 的扫描范围包括所有在 JVM 启动时通过 `-classpath` 或 `-cp` 指定的路径（包括 Maven/Gradle 依赖）。
+
+3）遍历所有的资源，通过 `resource.getProtocol()` 获取 URL 对象的协议类型，获取 URL 对象的类文件  
+```java
+while (resources.hasMoreElements()){
+    URL resource = resources.nextElement();
+    if (resource.getProtocol().equals("file")) {
+        classes.addAll(findClasses(new File(resource.getFile()), packageName, classFilter));
+    }
+}
+```
+->进入 `findClasses` 方法
+
+4）获取文件列表，遍历文件和子目录，获取 `clazz` 对象，并返回 `List<Class<?>> classes` 列表  
+```java
+File[] files = directory.listFiles();          
+for (File file : files) {
+    if (file.isDirectory()) {
+        String subPackage = packageName + "." + file.getName();
+        classes.addAll(findClasses(file, subPackage, classFilter));
+    } else if (file.getName().endsWith(".class")) {
+        String className = packageName + '.' +
+                file.getName().substring(0, file.getName().length() - 6); //获取class全类名
+        Class<?> clazz = Class.forName(className, false, Thread.currentThread().getContextClassLoader()); //根据全类名找到clazz对象(不对类进行初始化)
+        if (classFilter.test(clazz)) { //过滤器检查
+            classes.add(clazz);
         }
-    } while (!createdCount.compareAndSet(current, current + 1));
-    if (current < temporaryMax) {
-        log.warn("已启用动态扩容");
-        try {
-            rawConn = createPhysicalConnection();
-        } catch (SQLException e) {
-            createdCount.decrementAndGet(); // 创建失败时回滚计数器
-            throw e;
+    }
+}
+return classes;
+```
+
+5）提供了一个扫描含有对应注解的类  
+```java
+public static List<Class<?>> scanClassesWithAnnotation(String packageName,Class<? extends java.lang.annotation.Annotation> annotation) {
+    return scanClasses(packageName, clazz -> clazz.isAnnotationPresent(annotation));
+}
+```
+`Class<? extends java.lang.annotation.Annotation>` 表示接收的 `Class` 对象是 `java.lang.annotation.Annotation` 的任意子类。
+
+### 2. 手搓基础 DI 容器
+
+#### 0）用 map 来储存映射，在创建类对象时进行扫描  
+```java
+// 存储类定义的映射（类名 -> 类对象）
+private final Map<String, Class<?>> classRegistry = new HashMap<>();
+// 存储单例实例的映射（类名 -> 实例）
+private final Map<String, Object> singletonInstances = new HashMap<>();
+// 正在创建的Bean记录（用于解决循环依赖）
+private final Set<String> beansInCreation = new HashSet<>();
+//接口到实现类的映射
+private final Map<Class<?>, Class<?>> interfaceToImplementation = new HashMap<>();
+// 包扫描路径
+private final String basePackage;
+
+public ContainerFactory(String basePackage) {
+    this.basePackage = basePackage;
+    scanComponents();
+    initializeInterfaceLinks();
+    initializeSingletons();
+}
+```
+
+#### 1）组件扫描  
+```java
+private void scanComponents() {
+    List<Class<?>> componentClasses = ClassPathScanner.scanClassesWithAnnotation(
+            basePackage, KatComponent.class);
+
+    for (Class<?> clazz : componentClasses) {
+        register(clazz);
+    }
+}
+```
+-> 进入 `register` 方法
+
+#### 2）注册组件  
+```java
+public void register(Class<?> clazz) {
+    if (clazz.isAnnotationPresent(KatComponent.class)) {
+        String beanName = getBeanName(clazz);
+        classRegistry.put(beanName, clazz);
+    }
+}
+```
+// 获取Bean名称  
+```java
+private String getBeanName(Class<?> clazz) {
+    KatComponent component = clazz.getAnnotation(KatComponent.class);
+    return component.value().isEmpty() ? clazz.getSimpleName() : component.value(); //注解没有指定Bean名称时，以类名作为Bean名称
+}
+```
+
+#### 3）对单例 Bean 进行初始化  
+```java
+// 初始化所有单例Bean
+private void initializeSingletons() {
+    for (Map.Entry<String, Class<?>> entry : classRegistry.entrySet()) {
+        Class<?> clazz = entry.getValue();
+        if (clazz.isAnnotationPresent(KatSingleton.class)) {
+            getBean(clazz); // 触发单例初始化
+        }
+    }
+}
+```
+->进入 `getBean` 方法
+
+#### 4）获取 Bean 实例  
+这里采用了依赖注入接口模式，所以要从接口索引中获取对应的实现类  
+```java
+// 获取Bean实例(接口映射)
+@SuppressWarnings("unchecked") //忽略泛型警告
+public <T> T getBean(Class<T> interfaceType) {
+    //接口模式
+    Class<?> implementationClass = interfaceToImplementation.get(interfaceType); 
+    if (implementationClass == null) {
+        throw new RuntimeException("No implementation found for " + interfaceType);
+    }
+    return (T) getBean(getBeanName(implementationClass), implementationClass);
+}
+```
+//初始化接口索引  
+```java
+private void initializeInterfaceLinks() {
+    for (Class<?> clazz : classRegistry.values()) {
+        for (Class<?> intf : clazz.getInterfaces()) {
+            if (!interfaceToImplementation.containsKey(intf)) {
+                interfaceToImplementation.put(intf, clazz);
+            }
         }
     }
 }
 ```
 
-#### 2）动态缩容
-这里使用了 `ScheduledExecutorService` 定时任务调度器，`scheduleWithFixedDelay` 会周期性地触发里面的回调函数。
+-->进入实现类 Bean 创建
+
 ```java
-ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-// 启动缩容任务（每5分钟检查一次）
-public void startShrinkTask() {
-    scheduler.scheduleWithFixedDelay(() -> {
-        try {
-            int currentIdle = idleConnections.size();
-            int minIdle = hakimiConfig.getMinIdle();
-
-            // 仅当空闲连接 > minIdle 时才尝试缩容
-            if (currentIdle <= minIdle) {
-                return;
-            }
-
-            // 计算最多可回收的连接数（避免过度缩容）
-            int maxShrink = currentIdle - minIdle;
-            int shrunk = 0;
-
-            while (shrunk < maxShrink) {
-                // 非阻塞取出连接（避免长时间锁住队列）
-                Connection conn = idleConnections.poll(10, TimeUnit.MILLISECONDS);
-                if (conn == null) {
-                    break; // 队列已空
-                }
-
-                // 检查是否超时
-                if (isIdleTimeout(conn, hakimiConfig.getIdleTimeoutMillis())) {
-                    closeConnection(conn);
-                    createdCount.decrementAndGet();
-                    log.warn("关闭空闲连接");
-                    shrunk++;
-                } else {
-                    // 未超时，放回队列（避免误杀）
-                    idleConnections.offer(conn);
-                }
-            }
-        } catch (Exception e) {
-            log.error("Shrink task error", e);
-        }
-    }, 300, 300, TimeUnit.SECONDS);
-}
-
-// 检查连接是否空闲超时
-private boolean isIdleTimeout(Connection conn, long idleTimeoutMillis) {
-    if (conn instanceof Proxy) {
-        InvocationHandler handler = Proxy.getInvocationHandler(conn);
-        if (handler instanceof HakimiConnectionPool.ConnectionInvocationHandler) {
-            long idleTime = System.currentTimeMillis() -
-                    ((HakimiConnectionPool.ConnectionInvocationHandler) handler).lastUsedTime;
-            return idleTime > idleTimeoutMillis;
-        }
+@SuppressWarnings("unchecked") //忽略泛型警告
+public <T> T getBean(String beanName, Class<T> clazz) {
+    // 检查单例缓存
+    if (singletonInstances.containsKey(beanName)) {
+        return (T) singletonInstances.get(beanName);
     }
-    return false;
-}
-```
 
-### 2. 项目阶段性进度检查
-#### 已完成进阶需求
-- Maven 分模块化构建项目。
-- 完成数据库连接池，支持动态扩缩容（c3p0、druid）（并发安全（hard））。
-- 将常量配置转移到 `yml` 配置文件。
-- 输出日志文件。
-- 通过依赖注入（DI）进行控制反转（IOC），使用全局上下文进行全局对象的对象间依赖注入（使用注解）。
-- 实现 AOP 动态代理。
+    // 检查是否已注册
+    if (!classRegistry.containsKey(beanName)) {
+        throw new RuntimeException("Bean not registered: " + beanName);
+    }
 
-#### 目前需要完成的进阶需求
-- SQL 构建器 + 自定义 SQL，高兼容性的结果映射。
-- 用 `DispatcherController` 来统一接收数据，并转发给路径给对应 Controller 处理。
-- 自定义异常抛出，全局异常处理器，过滤器。
-- 后端以多线程模式运行，保证并发安全。（考虑方法级锁）
+    // 检查循环依赖
+    if (beansInCreation.contains(beanName)) {
+        throw new RuntimeException("Circular dependency detected for bean: " + beanName);
+    }
 
-#### 往后的进阶需求
-- 统一接收 JSON 格式数据，对数据进行混合加密（RSA + AES）。
-- 判题机制，可以运行 C++ 代码。
-- Nginx 部署前端 + Docker 容器技术。
-- 将项目部署到公网。
-
-### 3. 简单结果集映射
-#### 1）关键方法：预包装代理方法
-```java
-private static <T> BiFunction<ResultSet, Integer, T> createMapper(Class<T> targetClass) {
+    beansInCreation.add(beanName);
     try {
-        // 获取或创建构造函数句柄
-        Constructor<T> constructor = targetClass.getDeclaredConstructor();
-        constructor.setAccessible(true);
-        MethodHandle constructorHandle = MethodHandles.lookup().unreflectConstructor(constructor); // 使用MethodHandle包装构造器，比传统反射调用性能更高
+        Class<?> targetClass = classRegistry.get(beanName);
+        Object instance = createInstance(targetClass); //创建实例
 
-        // 从缓存获取或创建字段信息
-        Map<String, MethodHandle> setters = Cache.SETTER_CACHE
-                .computeIfAbsent(targetClass, KatSimpleMapper::createSetters);
+        // 如果是单例则缓存
+        if (targetClass.isAnnotationPresent(KatSingleton.class)) {
+            singletonInstances.put(beanName, instance);
+        }
 
-        Map<String, Class<?>> fieldTypes = Cache.FIELD_TYPE_CACHE
-                .computeIfAbsent(targetClass, KatSimpleMapper::getFieldTypes);
-
-        return (rs, index) -> {
-            try {
-                @SuppressWarnings("unchecked")
-                T instance = (T) constructorHandle.invoke(); // 创建目标对象实例
-
-                for (Map.Entry<String, MethodHandle> entry : setters.entrySet()) {
-                    String fieldName = entry.getKey();
-                    String columnName = namingStrategy.convert(fieldName);
-
-                    try {
-                        Object value = rs.getObject(columnName);
-                        if (value != null) {
-                            Class<?> fieldType = fieldTypes.get(fieldName);
-                            Object convertedValue = convertType(value, fieldType); // 类型转换
-                            entry.getValue().invoke(instance, convertedValue); // 设置属性值
-                        }
-                    } catch (SQLException e) {
-                        // 列不存在时跳过
-                    }
-                }
-                return instance;
-            } catch (Throwable e) {
-                throw new RuntimeException("Mapping failed for " + targetClass.getName(), e);
-            }
-        };
+        return (T) instance;
     } catch (Exception e) {
-        throw new RuntimeException("Mapper creation failed for " + targetClass.getName(), e);
+        throw new RuntimeException("Failed to create bean: " + beanName, e);
+    } finally {
+        beansInCreation.remove(beanName);
     }
 }
 ```
 
-#### 2）包装方法：负责将触发代理方法，将mapper结果映射到结果集中
+--->进入 `createInstance` 方法
+
+#### 5）创建实例  
 ```java
-public static <T> List<T> map(ResultSet rs, Class<T> targetClass) throws SQLException {
-    @SuppressWarnings("unchecked")
-    BiFunction<ResultSet, Integer, T> mapper = (BiFunction<ResultSet, Integer, T>)
-            Cache.MAPPER_CACHE.computeIfAbsent(targetClass, KatSimpleMapper::createMapper);
-
-    List<T> results = new ArrayList<>();
-    while (rs.next()) {
-        results.add(mapper.apply(rs, 1));
-    }
-    return results;
-}
-```
-
-#### 3）辅助方法
-- **数据库字段类型到java字段类型的转换**
-```java
-private static Object convertType(Object value, Class<?> targetType) {
-    if (value == null) return null;
-    if (targetType.isInstance(value)) return value;
-
-    // 数值类型转换
-    if (value instanceof Number number) {
-        if (targetType == Double.class || targetType == double.class) {
-            return number.doubleValue();
-        }
-        if (targetType == Float.class || targetType == float.class) {
-            return number.floatValue();
-        }
-        if (targetType == Integer.class || targetType == int.class) {
-            return number.intValue();
-        }
-        if (targetType == Long.class || targetType == long.class) {
-            return number.longValue();
-        }
-        if (targetType == Short.class || targetType == short.class) {
-            return number.shortValue();
-        }
+private Object createInstance(Class<?> clazz) throws Exception {
+    // 1. 优先使用@KatAutowired构造器
+    Constructor<?> autowiredCtor = findAutowiredConstructor(clazz);
+    if (autowiredCtor != null) {
+        return createInstanceWithConstructor(autowiredCtor);
     }
 
-    // 日期类型转换
-    if (value instanceof java.sql.Date sqlDate) {
-        if (targetType == LocalDate.class) {
-            return sqlDate.toLocalDate();
-        }
-        if (targetType == LocalDateTime.class) {
-            return sqlDate.toLocalDate().atStartOfDay();
-        }
-    }
-
-    // 布尔类型转换
-    if (value instanceof Boolean bool) {
-        if (targetType == Integer.class || targetType == int.class) {
-            return bool ? 1 : 0;
-        }
-        if (targetType == Double.class || targetType == double.class) {
-            return bool ? 1.0 : 0.0;
-        }
-    }
-
-    // 时间戳转换
-    if (value instanceof Timestamp timestamp) {
-        if (targetType == LocalDateTime.class) {
-            return timestamp.toLocalDateTime();
-        }
-        if (targetType == LocalDate.class) {
-            return timestamp.toLocalDateTime().toLocalDate();
-        }
-    }
-
-    return value;
-}
-```
-
-- **创建setter方法并缓存**
-```java
-private static <T> Map<String, MethodHandle> createSetters(Class<T> targetClass) {
+    // 2. 使用默认无参构造器
     try {
-        Map<String, MethodHandle> setters = new HashMap<>();
-        MethodHandles.Lookup lookup = MethodHandles.lookup(); // 获取MethodHandles.Lookup实例，用于方法/字段查找
-
-        for (Field field : targetClass.getDeclaredFields()) {
-            try {
-                MethodHandle setter = lookup.unreflectSetter(field); // 尝试通过标准setter方法获取MethodHandle
-                setters.put(field.getName(), setter);
-            } catch (IllegalAccessException e) {
-                // 如果字段没有setter，尝试直接设置字段值
-                field.setAccessible(true);
-                MethodHandle setter = lookup.unreflectSetter(field);
-                setters.put(field.getName(), setter);
-            }
-        }
-        return Collections.unmodifiableMap(setters); // 返回不可修改的Map
-    } catch (Exception e) {
-        throw new RuntimeException("Failed to create setters for " + targetClass.getName(), e);
+        Object instance = clazz.getDeclaredConstructor().newInstance();
+        injectFields(instance);
+        return instance;
+    } catch (NoSuchMethodException e) {
+        throw new RuntimeException("No suitable constructor found for " + clazz.getName());
     }
+}
+```
+
+---->进入 `findAutowiredConstructor` 方法
+
+```java
+// 查找@KatAutowired构造器
+private Constructor<?> findAutowiredConstructor(Class<?> clazz) {
+    Constructor<?>[] ctors = clazz.getConstructors();
+    for (Constructor<?> ctor : ctors) {
+        if (ctor.isAnnotationPresent(KatAutowired.class)) {
+            return ctor;
+        }
+    }
+    return null;
+}
+```
+
+---->进入 `createInstanceWithConstructor` 方法
+
+```java
+// 使用构造器创建实例
+private Object createInstanceWithConstructor(Constructor<?> ctor) throws Exception {
+    Class<?>[] paramTypes = ctor.getParameterTypes(); //获取参数
+    Object[] args = new Object[paramTypes.length];
+
+    for (int i = 0; i < paramTypes.length; i++) { //添加参数
+        args[i] = getBean(paramTypes[i]);
+    }
+
+    Object instance = ctor.newInstance(args); //创建实例
+    injectFields(instance); //注入依赖字段
+    return instance;
+}
+```
+
+----->进入 `injectFields` 方法
+
+```java
+// 注入字段依赖
+private void injectFields(Object instance) throws IllegalAccessException {
+    Class<?> clazz = instance.getClass();
+    //遍历目标类的所有字段（包括私有字段）
+    for (Field field : clazz.getDeclaredFields()) {
+        // 检查字段是否被@KatAutowired注解标注
+        if (field.isAnnotationPresent(KatAutowired.class)) {
+            Object dependency = getBean(field.getType());
+            field.setAccessible(true); //允许访问私有字段
+            field.set(instance, dependency); //注入目标字段
+        }
+    }
+}
+```
+
+目前只是一个非常基础的版本，处理不了复杂的依赖关系，整体效率也比较低。  
+明天考虑兼容动态代理，多路径扫描（通过配置文件加载）。
+
+### 3. 动态代理
+在运行时动态创建代理类和对象，而不是在编译时静态定义。它对于依赖注入后的事务实现以及 AOP 非常重要。
+
+#### 1）原理分析
+以 `InvocationHandler` 为例  
+`InvocationHandler` 是 Java 动态代理机制中的核心接口，它定义了代理对象方法调用的转发逻辑。  
+```java
+public interface InvocationHandler {
+    public Object invoke(Object proxy, Method method, Object[] args)
+        throws Throwable;
+}
+```
+- `proxy`：动态生成的代理对象实例  
+- `method`：被调用的方法对象  
+- `args`：方法调用时传入的参数数组  
+
+使用示例：  
+```java
+class DebugInvocationHandler implements InvocationHandler {
+    private final Object target;
+    public DebugInvocationHandler(Object target) {
+        this.target = target;
+    }   
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 方法调用前逻辑
+        System.out.printf("调用方法: %s，参数: %s%n", 
+                         method.getName(), 
+                         Arrays.toString(args));
+        
+        // 调用真实对象的方法
+        Object result = method.invoke(target, args);
+
+        // 方法调用后逻辑
+        System.out.printf("方法 %s 调用完成，结果: %s%n", 
+                         method.getName(), 
+                         result);
+        return result;
+    }
+}
+
+public static void main(String[] args) {
+    RealSubject real = new RealSubject(); //真实的对象
+    //创建一个代理对象
+    Subject proxy = (Subject) Proxy.newProxyInstance(
+            Subject.class.getClassLoader(),
+            new Class[]{Subject.class},
+            new DebugInvocationHandler(real)
+    );
+    //代理对象.method() → InvocationHandler.invoke() → 真实对象.method()
+    proxy.request();
 }
 ```
 
@@ -284,6 +345,6 @@ private static <T> Map<String, MethodHandle> createSetters(Class<T> targetClass)
 
 ## 结语
 ----------------------------------------
-。
+大脑已经宕机。
 
 ---------------------------------------
